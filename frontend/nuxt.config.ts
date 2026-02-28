@@ -30,6 +30,7 @@ export default defineNuxtConfig({
 			uploadPreviewBasePath: process.env.NUXT_PUBLIC_UPLOAD_PREVIEW_BASE_PATH || "/api/uploads/image/",
 			genaiTextPath: process.env.NUXT_PUBLIC_GENAI_TEXT_PATH || "/api/genai/text",
 			genaiImagePath: process.env.NUXT_PUBLIC_GENAI_IMAGE_PATH || "/api/genai/image",
+			presentationsPath: process.env.NUXT_PUBLIC_PRESENTATIONS_PATH || "/api/presentations",
 		},
 	},
 	shadcn: {

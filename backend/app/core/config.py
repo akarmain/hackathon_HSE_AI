@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     genai_default_llm_network: str = "gemini-3-flash"
     genai_default_image_network: str = "flux-2"
     genai_images_dir: str = "app/storage/genai"
+    presentations_dir: str = "app/storage/presentations"
+    presentation_min_slides: int = 5
+    presentation_max_slides: int = 20
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

@@ -59,25 +59,72 @@ class GenAPIClient:
         return result if isinstance(result, dict) else {"value": result}
 
     def extract_text(self, result_json: dict[str, Any]) -> str:
-        result = self._extract_result_node(result_json)
-        for key in ("text", "answer", "content", "response", "output"):
-            value = result.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        candidate = self._extract_text_candidate(result_json)
+        if candidate:
+            return candidate
 
-        for key in ("messages", "choices", "results", "items", "data", "output"):
-            arr = result.get(key)
-            if isinstance(arr, list) and arr:
-                first = arr[0]
-                if isinstance(first, dict):
-                    for field in ("text", "content", "answer"):
-                        value = first.get(field)
-                        if isinstance(value, str) and value.strip():
-                            return value.strip()
-                if isinstance(first, str) and first.strip():
-                    return first.strip()
+        result = self._extract_result_node(result_json)
+        fallback_candidate = self._extract_text_candidate(result)
+        if fallback_candidate:
+            return fallback_candidate
 
         return str(result_json)
+
+    def _extract_text_candidate(self, node: Any) -> str | None:
+        if isinstance(node, str):
+            stripped = node.strip()
+            return stripped or None
+
+        if isinstance(node, list):
+            for item in node:
+                candidate = self._extract_text_candidate(item)
+                if candidate:
+                    return candidate
+            return None
+
+        if not isinstance(node, dict):
+            return None
+
+        # OpenAI-like nested shape: choices[*].message.content
+        for envelope_key in ("message", "delta"):
+            envelope = node.get(envelope_key)
+            if isinstance(envelope, dict):
+                candidate = self._extract_text_candidate(envelope.get("content"))
+                if candidate:
+                    return candidate
+
+        # Direct text-like fields
+        for key in ("text", "answer", "content", "response", "output"):
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, list):
+                # Some providers return content as a list of blocks.
+                for block in value:
+                    if isinstance(block, dict):
+                        candidate = self._extract_text_candidate(block.get("text") or block.get("content"))
+                        if candidate:
+                            return candidate
+
+        # Container fields (priority order)
+        for key in (
+            "choices",
+            "messages",
+            "results",
+            "items",
+            "result",
+            "data",
+            "full_response",
+            "output",
+            "value",
+        ):
+            if key not in node:
+                continue
+            candidate = self._extract_text_candidate(node.get(key))
+            if candidate:
+                return candidate
+
+        return None
 
     def _extract_image_payload(self, result_json: dict[str, Any]) -> tuple[str | None, bytes | None]:
         result_value = result_json.get("result")

@@ -1,6 +1,7 @@
 from pathlib import Path
 from time import time
 
+import requests
 from fastapi import HTTPException, status
 
 from app.core.config import Settings
@@ -36,21 +37,57 @@ class GenAIService:
 
     def ask_text(self, payload: GenAITextRequest) -> GenAITextResponse:
         client = self._require_client()
-        network_id = payload.network_id or self._settings.genai_default_llm_network
+        default_network = self._settings.genai_default_llm_network
+        requested_network = payload.network_id or default_network
 
         messages: list[dict[str, str]] = []
         if payload.system:
             messages.append({"role": "system", "content": payload.system})
         messages.append({"role": "user", "content": payload.question})
 
-        request_payload = {
-            "model": payload.model or network_id,
-            "messages": messages,
-        }
-        request_id = client.submit_generation(network_id=network_id, payload=request_payload)
-        result = client.poll_until_done(request_id=request_id, max_wait_seconds=120)
-        answer = client.extract_text(result)
-        return GenAITextResponse(answer=answer, raw=result)
+        # Fallback strategy:
+        # 1) requested network + requested model
+        # 2) default network + requested model
+        # 3) default network + default model name (= network id)
+        attempts: list[tuple[str, str | None]] = [(requested_network, payload.model)]
+        if requested_network != default_network:
+            attempts.append((default_network, payload.model))
+        if payload.model:
+            attempts.append((default_network, None))
+
+        deduped_attempts: list[tuple[str, str | None]] = []
+        for network_id, model_name in attempts:
+            candidate = (network_id, model_name)
+            if candidate not in deduped_attempts:
+                deduped_attempts.append(candidate)
+
+        last_error: Exception | None = None
+        for index, (network_id, model_name) in enumerate(deduped_attempts):
+            try:
+                request_payload = {
+                    "model": model_name or network_id,
+                    "messages": messages,
+                }
+                request_id = client.submit_generation(network_id=network_id, payload=request_payload)
+                result = client.poll_until_done(request_id=request_id, max_wait_seconds=120)
+                answer = client.extract_text(result)
+                return GenAITextResponse(answer=answer, raw=result)
+            except requests.HTTPError as exc:
+                last_error = exc
+                status_code = exc.response.status_code if exc.response is not None else None
+                can_retry = index < len(deduped_attempts) - 1 and status_code in {400, 404, 422}
+                if can_retry:
+                    continue
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if index < len(deduped_attempts) - 1:
+                    continue
+                raise
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("Text generation failed without a specific error.")
 
     def generate_image(self, payload: GenAIImageRequest) -> GenAIImageResponse:
         client = self._require_client()
