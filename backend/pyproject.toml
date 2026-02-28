@@ -1,0 +1,27 @@
+[project]
+name = "fastapi-counter"
+version = "0.1.0"
+description = "Minimal production-style FastAPI scaffold with layered vertical feature architecture"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0,<1.0.0",
+  "uvicorn[standard]>=0.30.0,<1.0.0",
+  "pydantic-settings>=2.4.0,<3.0.0",
+  "python-multipart>=0.0.9,<1.0.0",
+  "requests>=2.32.0,<3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0,<9.0.0",
+  "httpx>=0.27.0,<1.0.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

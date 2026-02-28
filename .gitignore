@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -205,3 +205,16 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# OS / IDE
+.DS_Store
+.idea/
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/.nuxt/
+frontend/.output/
+
+# Runtime generated files
+backend/app/storage/*
+!backend/app/storage/.gitkeep
