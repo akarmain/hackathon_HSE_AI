@@ -55,3 +55,18 @@ def test_delete_uploaded_file(tmp_path: Path) -> None:
     assert deleted.deleted is True
     assert deleted.filename == "to_delete.png"
     assert not target.exists()
+
+
+def test_list_uploaded_files_ignores_hidden_files(tmp_path: Path) -> None:
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    (uploads_dir / ".DS_Store").write_bytes(b"meta")
+    (uploads_dir / "photo.png").write_bytes(b"img")
+
+    settings = Settings(uploads_dir=str(uploads_dir))
+    service = UploadsService(settings=settings)
+
+    files = service.list_uploaded_files()
+    names = [item.filename for item in files]
+    assert "photo.png" in names
+    assert ".DS_Store" not in names

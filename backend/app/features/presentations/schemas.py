@@ -31,7 +31,7 @@ class PresentationFileRef(BaseModel):
 
 class CreatePresentationRequest(BaseModel):
     prompt: str = Field(min_length=1)
-    slideCount: int = Field(ge=5, le=20)
+    slideCount: int = Field(ge=2, le=15)
     workType: WorkType
     showScript: bool = True
     files: list[PresentationFileRef] = Field(default_factory=list)
@@ -59,7 +59,7 @@ class PresentationStatusResponse(BaseModel):
 
 class PresentationPromptTestRequest(BaseModel):
     prompt: str = Field(min_length=1)
-    slideCount: int = Field(ge=5, le=20)
+    slideCount: int = Field(ge=2, le=15)
     workType: WorkType
     showScript: bool = True
     files: list[PresentationFileRef] = Field(default_factory=list)

@@ -106,6 +106,8 @@ class UploadsService:
         files: list[UploadedFileItem] = []
 
         for path in sorted(self._uploads_dir.iterdir()):
+            if path.name.startswith("."):
+                continue
             if path.is_file():
                 files.append(
                     UploadedFileItem(

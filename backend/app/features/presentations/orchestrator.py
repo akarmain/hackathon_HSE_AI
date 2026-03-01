@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import re
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from shutil import copy2
 
@@ -17,6 +18,7 @@ from app.features.genai.service import GenAIService
 from app.features.presentations.model_constants import (
     SCENARIO_MODEL,
     SCENARIO_NETWORK_ID,
+    SLIDE_CONCURRENCY,
     WORKER_MODE,
     WORKER_MODEL,
     WORKER_NETWORK_ID,
@@ -474,6 +476,13 @@ class PresentationOrchestrator:
         )
         logger.info("Presentation %s scenario: %s", presentation_id, json.dumps(scenario, ensure_ascii=False))
         self._storage.save_scenario(presentation_id, scenario)
+        script_text: str | None = None
+        if request["showScript"]:
+            script_text = self._build_script_text_from_scenario(scenario["slides"])
+            if script_text:
+                self._storage.save_script(presentation_id, script_text)
+                # Expose script as soon as scenario is ready instead of waiting for all slides.
+                self._storage.update_meta(presentation_id, scriptText=script_text)
 
         file_key_to_path = {
             item["key"]: Path(item["absolutePath"])
@@ -482,17 +491,16 @@ class PresentationOrchestrator:
         }
 
         slides = meta["slides"]
-        ready_slide_paths: list[Path] = []
-        script_lines: list[str] = []
+        ready_slide_paths_by_index: dict[int, Path] = {}
         slides_ready = 0
         global_style = scenario.get("globalStyle", {})
+        max_workers = max(1, min(int(SLIDE_CONCURRENCY), len(scenario["slides"])))
 
-        for index, slide_data in enumerate(scenario["slides"], start=1):
-            try:
-                if index in force_fail_slide_indexes:
-                    raise RuntimeError("Forced slide failure for testing.")
-
-                html, image_paths = self._build_slide_html_and_assets(
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"slide-{presentation_id[:6]}") as executor:
+            future_to_index = {}
+            for index, slide_data in enumerate(scenario["slides"], start=1):
+                future = executor.submit(
+                    self._generate_single_slide,
                     presentation_id=presentation_id,
                     slide_index=index,
                     slide_data=slide_data,
@@ -501,45 +509,49 @@ class PresentationOrchestrator:
                     worker_model=WORKER_MODEL,
                     worker_network_id=WORKER_NETWORK_ID,
                     file_key_to_path=file_key_to_path,
+                    force_fail=index in force_fail_slide_indexes,
+                )
+                future_to_index[future] = index
+
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    result = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    result = {
+                        "status": SlideStatus.failed.value,
+                        "errors": [f"Slide {index}: {exc}"],
+                        "pngPath": None,
+                    }
+
+                if result["status"] == SlideStatus.ready.value:
+                    slides[index - 1]["status"] = SlideStatus.ready.value
+                    slides_ready += 1
+                    png_path_raw = result.get("pngPath")
+                    if isinstance(png_path_raw, str) and png_path_raw:
+                        ready_slide_paths_by_index[index] = Path(png_path_raw)
+                else:
+                    slides[index - 1]["status"] = SlideStatus.failed.value
+
+                for message in result.get("errors", []):
+                    if isinstance(message, str) and message.strip():
+                        errors.append(message.strip())
+
+                self._storage.update_meta(
+                    presentation_id,
+                    status=PresentationStatus.running.value,
+                    slides=slides,
+                    slidesReady=slides_ready,
                     errors=errors,
                 )
-                html_path = self._storage.slides_dir(presentation_id) / f"{index:02d}.html"
-                html_path.write_text(html, encoding="utf-8")
-
-                png_path = self._storage.get_slide_path(presentation_id, f"{index:02d}.png")
-                self._renderer.render(
-                    output_path=png_path,
-                    html=html,
-                    fallback_title=slide_data["title"],
-                    fallback_text=slide_data["mainText"],
-                )
-                slides[index - 1]["status"] = SlideStatus.ready.value
-                slides_ready += 1
-                ready_slide_paths.append(png_path)
-            except Exception as exc:  # noqa: BLE001
-                slides[index - 1]["status"] = SlideStatus.failed.value
-                errors.append(f"Slide {index}: {exc}")
-
-            if request["showScript"]:
-                notes = (slide_data.get("speakerNotes") or "").strip()
-                if notes:
-                    script_lines.append(f"[Slide {index}] {notes}")
-
-            self._storage.update_meta(
-                presentation_id,
-                status=PresentationStatus.running.value,
-                slides=slides,
-                slidesReady=slides_ready,
-                errors=errors,
-            )
-
-        script_text: str | None = None
-        if request["showScript"] and script_lines:
-            script_text = "\n\n".join(script_lines)
-            self._storage.save_script(presentation_id, script_text)
 
         download_path: str | None = None
         download_url: str | None = None
+
+        ready_slide_paths = [
+            ready_slide_paths_by_index[index]
+            for index in sorted(ready_slide_paths_by_index.keys())
+        ]
 
         if ready_slide_paths:
             try:
@@ -565,6 +577,98 @@ class PresentationOrchestrator:
             downloadUrl=download_url,
             errors=errors,
         )
+
+    def _build_script_text_from_scenario(self, slides: list[dict]) -> str | None:
+        script_lines: list[str] = []
+        for index, slide_data in enumerate(slides, start=1):
+            notes = str(slide_data.get("speakerNotes") or "").strip()
+            if notes:
+                script_lines.append(f"[Slide {index}] {notes}")
+                continue
+
+            title = str(slide_data.get("title") or "").strip()
+            main_text = str(slide_data.get("mainText") or "").strip()
+            bullets = [
+                str(item).strip()
+                for item in (slide_data.get("bullets") or [])
+                if str(item).strip()
+            ]
+            fragments: list[str] = []
+            if title:
+                fragments.append(title)
+            if main_text:
+                fragments.append(main_text)
+            if bullets:
+                fragments.append(f"Ключевые пункты: {'; '.join(bullets[:3])}.")
+            if fragments:
+                script_lines.append(f"[Slide {index}] {' '.join(fragments)}")
+
+        if not script_lines:
+            return None
+        return "\n\n".join(script_lines)
+
+    def _generate_single_slide(
+        self,
+        *,
+        presentation_id: str,
+        slide_index: int,
+        slide_data: dict,
+        global_style: dict,
+        worker_mode: str,
+        worker_model: str | None,
+        worker_network_id: str | None,
+        file_key_to_path: dict[str, Path],
+        force_fail: bool,
+    ) -> dict:
+        slide_errors: list[str] = []
+        png_path: Path | None = None
+        status = SlideStatus.failed.value
+
+        try:
+            if force_fail:
+                raise RuntimeError("Forced slide failure for testing.")
+
+            html, _ = self._build_slide_html_and_assets(
+                presentation_id=presentation_id,
+                slide_index=slide_index,
+                slide_data=slide_data,
+                global_style=global_style,
+                worker_mode=worker_mode,
+                worker_model=worker_model,
+                worker_network_id=worker_network_id,
+                file_key_to_path=file_key_to_path,
+                errors=slide_errors,
+            )
+            html_path = self._storage.slides_dir(presentation_id) / f"{slide_index:02d}.html"
+            html_path.write_text(html, encoding="utf-8")
+
+            png_path = self._storage.get_slide_path(presentation_id, f"{slide_index:02d}.png")
+            self._renderer.render(
+                output_path=png_path,
+                html=html,
+                fallback_title=slide_data.get("title") or f"Slide {slide_index}",
+                fallback_text=slide_data.get("mainText") or "",
+            )
+            status = SlideStatus.ready.value
+        except Exception as exc:  # noqa: BLE001
+            slide_errors.append(str(exc))
+            status = SlideStatus.failed.value
+
+        prefixed_errors: list[str] = []
+        for err in slide_errors:
+            clean = str(err).strip()
+            if not clean:
+                continue
+            if clean.lower().startswith(f"slide {slide_index}:"):
+                prefixed_errors.append(clean)
+            else:
+                prefixed_errors.append(f"Slide {slide_index}: {clean}")
+
+        return {
+            "status": status,
+            "errors": prefixed_errors,
+            "pngPath": str(png_path) if png_path else None,
+        }
 
     def _build_zip(self, slide_paths: list[Path], output_path: Path) -> None:
         with zipfile.ZipFile(output_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -1380,6 +1484,8 @@ class PresentationOrchestrator:
 
         global_style = self._normalize_global_style(scenario.get("globalStyle", {}), work_type)
         topic = self._extract_topic_label(prompt)
+        content_mode = self._infer_content_mode(prompt)
+        slide_topic_directives = self._extract_slide_topic_directives(prompt)
         requested_titles = {title.strip().lower() for title in self._extract_requested_slide_titles(prompt)}
         focus_points = self._extract_focus_points(prompt)
 
@@ -1402,6 +1508,8 @@ class PresentationOrchestrator:
                 focus_points=focus_points,
                 slide_index=index + 1,
                 slide_count=slide_count,
+                content_mode=content_mode,
+                slide_topic=slide_topic_directives.get(index + 1),
             )
             title = normalized_content["title"]
             subtitle = normalized_content["subtitle"]
@@ -1411,7 +1519,12 @@ class PresentationOrchestrator:
 
             signature = "|".join([title.strip().lower(), main_text.strip().lower(), "||".join(bullets)])
             if signature in seen_signatures:
-                kind = self._classify_phase_kind(title=title, slide_index=index + 1, slide_count=slide_count)
+                kind = self._classify_phase_kind(
+                    title=title,
+                    slide_index=index + 1,
+                    slide_count=slide_count,
+                    mode=content_mode,
+                )
                 fallback_phase = self._build_fallback_phase(
                     topic=topic,
                     title=f"{title} — часть {index + 1}",
@@ -1420,6 +1533,8 @@ class PresentationOrchestrator:
                     slide_count=slide_count,
                     style_hint=self._extract_style_hint(prompt),
                     focus_points=focus_points,
+                    mode=content_mode,
+                    slide_topic=slide_topic_directives.get(index + 1),
                 )
                 title = fallback_phase["title"]
                 main_text = fallback_phase["main_text"]
@@ -1474,6 +1589,8 @@ class PresentationOrchestrator:
         focus_points: list[str],
         slide_index: int,
         slide_count: int,
+        content_mode: str,
+        slide_topic: str | None,
     ) -> dict:
         raw_title = self._truncate_text(str(raw.get("title") or "").strip(), 96)
         raw_subtitle = self._truncate_text(str(raw.get("subtitle") or "").strip(), 140)
@@ -1485,7 +1602,13 @@ class PresentationOrchestrator:
         ][:8]
         raw_kicker = self._truncate_text(str(raw.get("kicker") or "").strip().lower(), 40)
 
-        default_title = self._default_phase_titles()[(slide_index - 1) % len(self._default_phase_titles())]
+        default_titles = self._default_phase_titles(
+            mode=content_mode,
+            topic=topic,
+            slide_count=slide_count,
+            slide_topic_directives={slide_index: slide_topic} if slide_topic else {},
+        )
+        default_title = default_titles[(slide_index - 1) % len(default_titles)]
         title_for_kind = raw_title or default_title
         if raw_title and self._looks_like_meta_instruction(raw_title) and raw_title.lower() not in requested_titles:
             title_for_kind = default_title
@@ -1493,6 +1616,7 @@ class PresentationOrchestrator:
             title=title_for_kind,
             slide_index=slide_index,
             slide_count=slide_count,
+            mode=content_mode,
         )
         fallback_phase = self._build_fallback_phase(
             topic=topic,
@@ -1502,6 +1626,8 @@ class PresentationOrchestrator:
             slide_count=slide_count,
             style_hint=self._extract_style_hint(prompt),
             focus_points=focus_points,
+            mode=content_mode,
+            slide_topic=slide_topic,
         )
 
         title_lower = raw_title.lower()
@@ -1899,13 +2025,20 @@ class PresentationOrchestrator:
 
     def _build_fallback_phase_pool(self, *, prompt: str, slide_count: int) -> list[dict]:
         topic = self._extract_topic_label(prompt)
+        content_mode = self._infer_content_mode(prompt)
+        slide_topic_directives = self._extract_slide_topic_directives(prompt)
         requested_titles = self._extract_requested_slide_titles(prompt)
         style_hint = self._extract_style_hint(prompt)
         focus_points = self._extract_focus_points(prompt)
 
         if requested_titles:
             titles = requested_titles[:slide_count]
-            default_titles = self._default_phase_titles()
+            default_titles = self._default_phase_titles(
+                mode=content_mode,
+                topic=topic,
+                slide_count=slide_count,
+                slide_topic_directives=slide_topic_directives,
+            )
             cursor = 0
             while len(titles) < slide_count:
                 candidate = default_titles[cursor % len(default_titles)]
@@ -1913,7 +2046,12 @@ class PresentationOrchestrator:
                 if candidate not in titles:
                     titles.append(candidate)
         else:
-            base_titles = self._default_phase_titles()
+            base_titles = self._default_phase_titles(
+                mode=content_mode,
+                topic=topic,
+                slide_count=slide_count,
+                slide_topic_directives=slide_topic_directives,
+            )
             titles = base_titles[:slide_count]
             while len(titles) < slide_count:
                 extra_title = f"Практический блок {len(titles) + 1}"
@@ -1921,7 +2059,12 @@ class PresentationOrchestrator:
 
         phases: list[dict] = []
         for index, title in enumerate(titles, start=1):
-            kind = self._classify_phase_kind(title=title, slide_index=index, slide_count=slide_count)
+            kind = self._classify_phase_kind(
+                title=title,
+                slide_index=index,
+                slide_count=slide_count,
+                mode=content_mode,
+            )
             phases.append(
                 self._build_fallback_phase(
                     topic=topic,
@@ -1931,6 +2074,8 @@ class PresentationOrchestrator:
                     slide_count=slide_count,
                     style_hint=style_hint,
                     focus_points=focus_points,
+                    mode=content_mode,
+                    slide_topic=slide_topic_directives.get(index),
                 )
             )
         return phases
@@ -2047,26 +2192,127 @@ class PresentationOrchestrator:
                 break
         return points
 
-    def _default_phase_titles(self) -> list[str]:
-        return [
-            "Титульный слайд",
-            "Проблема и контекст",
-            "Ключевая идея",
-            "Как это работает",
-            "Архитектура решения",
-            "План внедрения",
-            "Демонстрация",
-            "Ценность и эффект",
-            "Риски и ограничения",
-            "Итоги и следующие шаги",
+    def _infer_content_mode(self, prompt: str) -> str:
+        lowered = prompt.lower()
+        project_markers = [
+            "проект",
+            "сервис",
+            "продукт",
+            "стартап",
+            "архитектур",
+            "pipeline",
+            "пайплайн",
+            "roadmap",
+            "хакатон",
+            "бизнес",
+            "метрик",
+            "внедрен",
+        ]
+        if any(marker in lowered for marker in project_markers):
+            return "project"
+        return "subject"
+
+    def _extract_slide_topic_directives(self, prompt: str) -> dict[int, str]:
+        directives: dict[int, str] = {}
+        patterns = [
+            re.compile(
+                r"(?P<idx>\d{1,2})\s*(?:-?й|-?ый|-?ая|-?ое)?\s*слайд[еа]?\s*(?:про|о)\s+(?P<topic>[^\n,.;:!?]{2,90})",
+                flags=re.IGNORECASE,
+            ),
+            re.compile(
+                r"(?:на|для)\s*(?P<idx>\d{1,2})\s*(?:-?й|-?ый|-?ая|-?ое)?\s*слайд[еа]?\s*(?P<topic>[^\n,.;:!?]{2,90})",
+                flags=re.IGNORECASE,
+            ),
+            re.compile(
+                r"slide\s*(?P<idx>\d{1,2})\s*(?:about|on)\s*(?P<topic>[^\n,.;:!?]{2,90})",
+                flags=re.IGNORECASE,
+            ),
         ]
 
-    def _classify_phase_kind(self, *, title: str, slide_index: int, slide_count: int) -> str:
+        for pattern in patterns:
+            for match in pattern.finditer(prompt):
+                try:
+                    idx = int(match.group("idx"))
+                except Exception:  # noqa: BLE001
+                    continue
+                if idx < 1 or idx > 20:
+                    continue
+                topic = self._truncate_text(match.group("topic").strip(" -:;,.").strip(), 90)
+                if topic:
+                    directives[idx] = topic
+        return directives
+
+    def _default_phase_titles(
+        self,
+        *,
+        mode: str,
+        topic: str,
+        slide_count: int,
+        slide_topic_directives: dict[int, str],
+    ) -> list[str]:
+        if mode == "project":
+            titles = [
+                "Титульный слайд",
+                "Проблема и контекст",
+                "Ключевая идея",
+                "Как это работает",
+                "Архитектура решения",
+                "План внедрения",
+                "Демонстрация",
+                "Ценность и эффект",
+                "Риски и ограничения",
+                "Итоги и следующие шаги",
+            ]
+        else:
+            titles = [
+                f"{topic}: вводная часть",
+                "Ключевые характеристики темы",
+                "Классификация и основные виды",
+                "Глубокий разбор важного аспекта",
+                "Примеры и наблюдения",
+                "Значение темы в реальной жизни",
+                "Сравнение подходов и точек зрения",
+                "Проблемы и спорные вопросы",
+                "Текущие тренды и развитие",
+                "Итоги и выводы",
+            ]
+
+        for index, directive_topic in slide_topic_directives.items():
+            if 1 <= index <= len(titles):
+                if mode == "project":
+                    titles[index - 1] = f"Фокус: {directive_topic}"
+                else:
+                    titles[index - 1] = f"{directive_topic}: ключевые факты"
+
+        return titles[: max(1, slide_count)]
+
+    def _classify_phase_kind(self, *, title: str, slide_index: int, slide_count: int, mode: str = "project") -> str:
         lowered = title.lower()
         if slide_index == 1 or any(token in lowered for token in ["титул", "title", "обзор", "введение"]):
             return "title"
         if slide_index == slide_count or any(token in lowered for token in ["итог", "финал", "спасибо", "заключ"]):
             return "final"
+        if mode != "project":
+            if any(token in lowered for token in ["классиф", "вид", "тип"]):
+                return "taxonomy"
+            if any(token in lowered for token in ["пример", "наблюден", "кейс", "сравнен"]):
+                return "examples"
+            if any(token in lowered for token in ["значени", "роль", "влияни"]):
+                return "impact"
+            if any(token in lowered for token in ["проблем", "спорн", "огранич", "риск"]):
+                return "challenges"
+            if any(token in lowered for token in ["тренд", "развит", "перспектив"]):
+                return "trends"
+            if slide_index == 2:
+                return "fundamentals"
+            if slide_index == 3:
+                return "taxonomy"
+            if slide_index == 4:
+                return "deep_dive"
+            if slide_index == 5:
+                return "examples"
+            return "analysis"
+
         if any(token in lowered for token in ["проблем", "боль", "огранич"]):
             return "problem"
         if any(token in lowered for token in ["идея", "решени", "подход"]):
@@ -2095,6 +2341,8 @@ class PresentationOrchestrator:
         slide_count: int,
         style_hint: str,
         focus_points: list[str],
+        mode: str,
+        slide_topic: str | None = None,
     ) -> dict:
         focus_primary = focus_points[0] if focus_points else f"Практический фокус по теме «{topic}»"
         focus_secondary = focus_points[1] if len(focus_points) > 1 else "Ключевые критерии качества результата"
@@ -2105,142 +2353,282 @@ class PresentationOrchestrator:
                 "чтобы текст и образ работали как единое сообщение."
             )
 
-        templates = {
-            "title": {
-                "kicker": "overview",
-                "main": (
-                    f"Презентация раскрывает тему «{topic}»: что именно происходит сейчас, "
-                    "какие есть узкие места и какой практический результат мы планируем получить."
-                ),
-                "bullets": [
-                    f"Фокус выступления: {focus_primary}",
-                    "Логика: от проблемы к рабочему решению",
-                    "Финальный результат и план действий",
-                ],
-            },
-            "problem": {
-                "kicker": "problem",
-                "main": (
-                    f"По теме «{topic}» есть конкретные проблемы, которые тормозят результат: "
-                    "нестабильный процесс, лишние затраты времени и высокий риск ошибок."
-                ),
-                "bullets": [
-                    "Что работает медленно или непредсказуемо",
-                    "Где чаще всего теряется качество",
-                    "Почему проблему нужно решать сейчас",
-                ],
-            },
-            "solution": {
-                "kicker": "solution",
-                "main": (
-                    f"Предлагаемый подход по теме «{topic}» строится вокруг прозрачного процесса: "
-                    "четкие входные данные, проверяемые шаги и измеримый выход."
-                ),
-                "bullets": [
-                    "Описываем целевую модель работы",
-                    "Выделяем ключевые компоненты решения",
-                    "Фиксируем критерии готовности",
-                ],
-            },
-            "architecture": {
-                "kicker": "architecture",
-                "main": (
-                    f"Архитектура решения для «{topic}» показывает, как связаны данные, "
-                    "логика принятия решений и визуальный результат на каждом шаге."
-                ),
-                "bullets": [
-                    "Основные модули и их роль",
-                    "Поток данных между этапами",
-                    "Точки контроля качества",
-                ],
-            },
-            "pipeline": {
-                "kicker": "pipeline",
-                "main": (
-                    f"Рабочий пайплайн по теме «{topic}» проходит путь от запроса к финальному результату "
-                    "через предсказуемые этапы обработки."
-                ),
-                "bullets": [
-                    "Подготовка и уточнение входного запроса",
-                    "Генерация структуры и контента слайдов",
-                    "Проверка качества и выпуск результата",
-                ],
-            },
-            "demo": {
-                "kicker": "demo",
-                "main": (
-                    f"На демонстрации показываем, как тема «{topic}» работает на реальном примере: "
-                    "с чем стартуем, что меняем и какой результат получаем на выходе."
-                ),
-                "bullets": [
-                    "Входные данные и условия кейса",
-                    "Промежуточные шаги реализации",
-                    "Итог и наблюдаемый эффект",
-                ],
-            },
-            "roadmap": {
-                "kicker": "roadmap",
-                "main": (
-                    f"Для развития решения по теме «{topic}» фиксируем план с четкими этапами, "
-                    "приоритетами и контрольными точками."
-                ),
-                "bullets": [
-                    "Ближайшие задачи на 2-4 недели",
-                    "Среднесрочные улучшения и масштабирование",
-                    "Метрики выполнения плана",
-                ],
-            },
-            "value": {
-                "kicker": "value",
-                "main": (
-                    f"Ценность подхода в теме «{topic}» измеряется не абстрактно, "
-                    "а через скорость, качество и предсказуемость итогового результата."
-                ),
-                "bullets": [
-                    "Какие затраты сокращаются",
-                    "Где снижается вероятность ошибок",
-                    "Какие показатели улучшаются",
-                ],
-            },
-            "risks": {
-                "kicker": "risks",
-                "main": (
-                    f"Риски в теме «{topic}» связаны с качеством входных данных, "
-                    "пограничными кейсами и отсутствием единых стандартов контроля."
-                ),
-                "bullets": [
-                    "Пределы применимости подхода",
-                    "Критичные зависимости и ограничения",
-                    "План снижения рисков",
-                ],
-            },
-            "final": {
-                "kicker": "final",
-                "main": (
-                    f"Итог по теме «{topic}»: мы получили структурный план работы, определили ключевые метрики "
-                    "и зафиксировали следующий практический шаг."
-                ),
-                "bullets": [
-                    "Ключевой вывод презентации",
-                    f"Главный акцент: {focus_secondary}",
-                    "Следующее действие после защиты",
-                ],
-            },
-            "analysis": {
-                "kicker": "analysis",
-                "main": (
-                    f"Раздел «{title}» уточняет предметные детали темы «{topic}» "
-                    "и переводит обсуждение в набор конкретных решений."
-                ),
-                "bullets": [
-                    "Что важно учесть в этом разделе",
-                    f"Практический фокус: {focus_primary}",
-                    "Как проверяем результат на практике",
-                ],
-            },
-        }
+        if mode == "project":
+            templates = {
+                "title": {
+                    "kicker": "overview",
+                    "main": (
+                        f"Презентация раскрывает тему «{topic}»: какую задачу мы решаем, "
+                        "почему это важно и каким должен быть итоговый результат."
+                    ),
+                    "bullets": [
+                        f"Фокус выступления: {focus_primary}",
+                        "Логика: от проблемы к рабочему решению",
+                        "Финальный результат и план действий",
+                    ],
+                },
+                "problem": {
+                    "kicker": "problem",
+                    "main": (
+                        f"По теме «{topic}» есть конкретные проблемы, которые тормозят результат: "
+                        "нестабильный процесс, лишние затраты времени и высокий риск ошибок."
+                    ),
+                    "bullets": [
+                        "Что работает медленно или непредсказуемо",
+                        "Где чаще всего теряется качество",
+                        "Почему проблему нужно решать сейчас",
+                    ],
+                },
+                "solution": {
+                    "kicker": "solution",
+                    "main": (
+                        f"Предлагаемый подход по теме «{topic}» строится вокруг прозрачного процесса: "
+                        "четкие входные данные, проверяемые шаги и измеримый выход."
+                    ),
+                    "bullets": [
+                        "Описываем целевую модель работы",
+                        "Выделяем ключевые компоненты решения",
+                        "Фиксируем критерии готовности",
+                    ],
+                },
+                "architecture": {
+                    "kicker": "architecture",
+                    "main": (
+                        f"Архитектура решения для «{topic}» показывает, как связаны данные, "
+                        "логика принятия решений и визуальный результат на каждом шаге."
+                    ),
+                    "bullets": [
+                        "Основные модули и их роль",
+                        "Поток данных между этапами",
+                        "Точки контроля качества",
+                    ],
+                },
+                "pipeline": {
+                    "kicker": "pipeline",
+                    "main": (
+                        f"Рабочий пайплайн по теме «{topic}» проходит путь от запроса к финальному результату "
+                        "через предсказуемые этапы обработки."
+                    ),
+                    "bullets": [
+                        "Подготовка и уточнение входного запроса",
+                        "Генерация структуры и контента слайдов",
+                        "Проверка качества и выпуск результата",
+                    ],
+                },
+                "demo": {
+                    "kicker": "demo",
+                    "main": (
+                        f"На демонстрации показываем, как тема «{topic}» работает на реальном примере: "
+                        "с чем стартуем, что меняем и какой результат получаем на выходе."
+                    ),
+                    "bullets": [
+                        "Входные данные и условия кейса",
+                        "Промежуточные шаги реализации",
+                        "Итог и наблюдаемый эффект",
+                    ],
+                },
+                "roadmap": {
+                    "kicker": "roadmap",
+                    "main": (
+                        f"Для развития решения по теме «{topic}» фиксируем план с четкими этапами, "
+                        "приоритетами и контрольными точками."
+                    ),
+                    "bullets": [
+                        "Ближайшие задачи на 2-4 недели",
+                        "Среднесрочные улучшения и масштабирование",
+                        "Метрики выполнения плана",
+                    ],
+                },
+                "value": {
+                    "kicker": "value",
+                    "main": (
+                        f"Ценность подхода в теме «{topic}» измеряется не абстрактно, "
+                        "а через скорость, качество и предсказуемость итогового результата."
+                    ),
+                    "bullets": [
+                        "Какие затраты сокращаются",
+                        "Где снижается вероятность ошибок",
+                        "Какие показатели улучшаются",
+                    ],
+                },
+                "risks": {
+                    "kicker": "risks",
+                    "main": (
+                        f"Риски в теме «{topic}» связаны с качеством входных данных, "
+                        "пограничными кейсами и отсутствием единых стандартов контроля."
+                    ),
+                    "bullets": [
+                        "Пределы применимости подхода",
+                        "Критичные зависимости и ограничения",
+                        "План снижения рисков",
+                    ],
+                },
+                "final": {
+                    "kicker": "final",
+                    "main": (
+                        f"Итог по теме «{topic}»: мы получили структурный план работы, определили ключевые метрики "
+                        "и зафиксировали следующий практический шаг."
+                    ),
+                    "bullets": [
+                        "Ключевой вывод презентации",
+                        f"Главный акцент: {focus_secondary}",
+                        "Следующее действие после защиты",
+                    ],
+                },
+                "analysis": {
+                    "kicker": "analysis",
+                    "main": (
+                        f"Раздел «{title}» уточняет предметные детали темы «{topic}» "
+                        "и переводит обсуждение в набор конкретных решений."
+                    ),
+                    "bullets": [
+                        "Что важно учесть в этом разделе",
+                        f"Практический фокус: {focus_primary}",
+                        "Как проверяем результат на практике",
+                    ],
+                },
+            }
+        else:
+            templates = {
+                "title": {
+                    "kicker": "overview",
+                    "main": (
+                        f"Открываем тему «{topic}»: определяем, что именно изучаем, "
+                        "какие вопросы ключевые и почему тема важна сегодня."
+                    ),
+                    "bullets": [
+                        "Короткое определение и границы темы",
+                        "Какие аспекты разберем по ходу презентации",
+                        "Какой вывод должен остаться у аудитории",
+                    ],
+                },
+                "fundamentals": {
+                    "kicker": "facts",
+                    "main": (
+                        f"Фиксируем базовые характеристики темы «{topic}», "
+                        "чтобы аудитория понимала фундамент и терминологию."
+                    ),
+                    "bullets": [
+                        "Ключевые признаки и свойства",
+                        "Что считается нормой и почему",
+                        "Какие заблуждения встречаются чаще всего",
+                    ],
+                },
+                "taxonomy": {
+                    "kicker": "structure",
+                    "main": (
+                        f"Разбираем, как тема «{topic}» делится на виды и категории, "
+                        "и чем они отличаются друг от друга."
+                    ),
+                    "bullets": [
+                        "Основные группы и критерии разделения",
+                        "Краткие отличия между группами",
+                        "Когда используется каждый вариант",
+                    ],
+                },
+                "deep_dive": {
+                    "kicker": "deep-dive",
+                    "main": (
+                        f"Делаем углубленный разбор по теме «{topic}»: "
+                        "смотрим важные детали, которые влияют на понимание предмета."
+                    ),
+                    "bullets": [
+                        "Ключевые механизмы или процессы",
+                        "Что влияет на результат сильнее всего",
+                        "Типичные ошибки интерпретации",
+                    ],
+                },
+                "examples": {
+                    "kicker": "examples",
+                    "main": (
+                        f"Показываем тему «{topic}» через конкретные примеры, "
+                        "чтобы теория стала понятной и прикладной."
+                    ),
+                    "bullets": [
+                        "Реальный или типовой пример",
+                        "Что видно на практике",
+                        "Какой вывод можно применить сразу",
+                    ],
+                },
+                "impact": {
+                    "kicker": "impact",
+                    "main": (
+                        f"Оцениваем влияние темы «{topic}» на людей, среду и решения, "
+                        "которые принимаются в реальной жизни."
+                    ),
+                    "bullets": [
+                        "Почему тема важна для общества",
+                        "Где тема влияет на повседневные решения",
+                        "Какие эффекты заметны в долгую",
+                    ],
+                },
+                "challenges": {
+                    "kicker": "challenges",
+                    "main": (
+                        f"Отмечаем спорные и сложные моменты в теме «{topic}», "
+                        "чтобы показать ограничения и точки для дальнейшего изучения."
+                    ),
+                    "bullets": [
+                        "Какие вопросы остаются открытыми",
+                        "Где есть противоречивые оценки",
+                        "Что требует дополнительной проверки",
+                    ],
+                },
+                "trends": {
+                    "kicker": "trends",
+                    "main": (
+                        f"Показываем, как тема «{topic}» меняется со временем, "
+                        "и какие направления развития сейчас наиболее заметны."
+                    ),
+                    "bullets": [
+                        "Текущие тренды и новые подходы",
+                        "Что может измениться в ближайшие годы",
+                        "На что стоит обращать внимание дальше",
+                    ],
+                },
+                "final": {
+                    "kicker": "final",
+                    "main": (
+                        f"Подводим итог по теме «{topic}»: закрепляем ключевые идеи "
+                        "и формулируем практический вывод для аудитории."
+                    ),
+                    "bullets": [
+                        "Главный вывод презентации",
+                        f"Что важно запомнить: {focus_secondary}",
+                        "Какие вопросы стоит изучить дальше",
+                    ],
+                },
+                "analysis": {
+                    "kicker": "analysis",
+                    "main": (
+                        f"Слайд «{title}» дополняет картину по теме «{topic}» "
+                        "и помогает связать факты в цельное понимание."
+                    ),
+                    "bullets": [
+                        "Ключевой факт этого раздела",
+                        "Почему это важно для общей картины",
+                        "К какому выводу нас это приводит",
+                    ],
+                },
+            }
 
-        template = templates.get(kind, templates["analysis"])
+        if slide_topic:
+            normalized_topic = self._truncate_text(slide_topic, 80)
+            topic_focus_template = {
+                "kicker": templates.get(kind, templates["analysis"])["kicker"],
+                "main": (
+                    f"Фокус слайда: «{normalized_topic}» в контексте темы «{topic}». "
+                    "Разбираем ключевые особенности, значимые факты и практические выводы."
+                ),
+                "bullets": [
+                    f"Что важно знать про «{normalized_topic}»",
+                    "Какие характеристики выделяют этот аспект",
+                    "Как этот фокус связан с общей темой",
+                ],
+            }
+            template = topic_focus_template
+        else:
+            template = templates.get(kind, templates["analysis"])
         main_text = f"{template['main']}{style_note}"
         bullets = [self._truncate_text(item, 120) for item in template["bullets"]]
 
@@ -2348,7 +2736,7 @@ class PresentationOrchestrator:
         unique_titles = len({item for item in titles if item})
         duplicate_ratio = 1 - (len(set(signatures)) / max(1, len(signatures)))
         too_many_duplicates = duplicate_ratio > 0.35
-        poor_topic_alignment = bool(prompt_tokens) and prompt_hits < max(2, len(slides) // 3)
+        poor_topic_alignment = bool(prompt_tokens) and prompt_hits < max(1, len(slides) // 4)
         weak_main_text = meaningful_main_text < max(2, len(slides) // 2)
         repeated_titles = unique_titles < max(2, len(slides) // 2)
         instructional_content = instructional_hits >= max(1, len(slides) // 4)

@@ -1,298 +1,307 @@
 <template>
-  <div class="relative h-[calc(100vh-4rem)] overflow-hidden px-3 py-3 fade-in">
-    <div class="h-full rounded-2xl border bg-background/85 shadow-sm backdrop-blur">
-      <div class="grid h-full grid-cols-1 gap-3 p-3 xl:grid-cols-[340px_minmax(0,1fr)]">
-        <aside class="flex min-h-0 flex-col gap-3 panel-appear">
-          <section class="rounded-xl border bg-card/70 p-3">
-            <div class="mb-2 flex items-center justify-between gap-2">
-              <h1 class="text-lg font-semibold">AI Deck Builder</h1>
-              <span class="rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">compact</span>
-            </div>
-            <p class="mb-2 text-xs text-muted-foreground">
-              Введите тему, настройте параметры в меню и запустите генерацию.
-            </p>
-            <textarea
-              v-model="presentationPrompt"
-              class="h-36 w-full resize-none rounded-lg border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              placeholder="Например: Презентация проекта о развитии города Мытищи"
-            />
-            <div class="mt-2 flex items-center gap-2">
-              <button
-                type="button"
-                class="inline-flex h-9 flex-1 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
-                :disabled="isSubmitting || isUploading"
-                @click="submitPresentation"
-              >
-                {{ isSubmitting ? "Генерация..." : "Сгенерировать" }}
-              </button>
-              <button
-                type="button"
-                class="inline-flex h-9 items-center justify-center rounded-md border px-3 text-sm font-medium transition-colors hover:bg-accent"
-                @click="prefillDemo"
-              >
-                Демо
-              </button>
-            </div>
-            <div class="mt-2 flex items-center justify-between rounded-md border bg-background/70 px-2 py-1.5">
-              <span class="text-xs text-muted-foreground">Генерация сценария (speaker notes)</span>
-              <Switch v-model:model-value="showScript" />
-            </div>
-            <p v-if="presentationError" class="mt-2 text-xs text-red-500">{{ presentationError }}</p>
-          </section>
+  <div class="workspace-page fade-in">
+    <div v-if="!isViewerMode" class="idle-state panel-appear">
+      <section class="idle-card">
+        <textarea
+          v-model="presentationPrompt"
+          class="prompt-input"
+          placeholder="Введите описание презентации"
+        />
 
-          <div class="flex flex-wrap gap-2">
-            <DropdownMenu>
-              <DropdownMenuTrigger as-child>
-                <Button type="button" variant="outline" size="sm" class="h-8">
-                  Настройки
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent class="w-64" align="start">
-                <DropdownMenuLabel>Параметры генерации</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>
-                    Слайды: {{ slideCount }}
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent class="w-36">
-                    <DropdownMenuItem
-                      v-for="count in slideCountOptions"
-                      :key="count"
-                      @click="selectSlideCount(count)"
-                    >
-                      {{ count }}
-                    </DropdownMenuItem>
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>
-                    Тип: {{ workTypeLabel }}
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent class="w-44">
-                    <DropdownMenuItem @click="selectWorkType('school')">Школьная</DropdownMenuItem>
-                    <DropdownMenuItem @click="selectWorkType('student')">Студенческая</DropdownMenuItem>
-                    <DropdownMenuItem @click="selectWorkType('academic')">Академическая</DropdownMenuItem>
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel class="text-[11px] text-muted-foreground">
-                  Дополнительные опции скрыты в компактном режиме
-                </DropdownMenuLabel>
-              </DropdownMenuContent>
-            </DropdownMenu>
-
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              class="h-8"
-              @click="showFilesPanel = !showFilesPanel"
-            >
-              {{ showFilesPanel ? "Скрыть файлы" : "Файлы" }}
-            </Button>
-
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              class="h-8"
-              @click="showLegacyPanel = !showLegacyPanel"
-            >
-              Legacy
-            </Button>
+        <div class="idle-controls">
+          <div class="mini-select-wrap">
+            <span class="mini-label">Слайды</span>
+            <select v-model.number="slideCount" class="mini-select">
+              <option v-for="count in slideCountOptions" :key="count" :value="count">
+                {{ count }}
+              </option>
+            </select>
           </div>
 
-          <transition name="panel">
-            <section v-if="showFilesPanel" class="flex min-h-0 flex-1 flex-col rounded-xl border bg-card/70 p-3">
-              <h2 class="mb-2 text-sm font-medium">Файлы и ключи</h2>
-              <div
-                class="cursor-pointer rounded-md border-2 border-dashed p-3 text-center transition-colors"
-                :class="isDragActive ? 'border-primary bg-primary/5' : 'border-border'"
-                role="button"
-                tabindex="0"
-                @dragenter.prevent="isDragActive = true"
-                @dragover.prevent="isDragActive = true"
-                @dragleave.prevent="isDragActive = false"
-                @drop.prevent="onDrop"
-                @click="openFileDialog"
-                @keydown.enter.prevent="openFileDialog"
-                @keydown.space.prevent="openFileDialog"
-              >
-                <p class="text-xs text-muted-foreground">Перетащите изображение или нажмите</p>
-              </div>
-              <p class="mt-1 text-[11px] text-muted-foreground">PNG/JPG/WEBP/GIF до 10MB</p>
+          <div class="mini-select-wrap">
+            <span class="mini-label">Тип</span>
+            <select v-model="workType" class="mini-select">
+              <option value="school">Школьная</option>
+              <option value="student">Студенческая</option>
+              <option value="academic">Академическая</option>
+            </select>
+          </div>
 
-              <input
-                ref="fileInputRef"
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif"
-                class="hidden"
-                @change="onFileInputChange"
-              >
+          <div class="switch-row switch-chip">
+            <span class="text-xs text-muted-foreground">Сценарий</span>
+            <Switch v-model:model-value="showScript" />
+          </div>
 
-              <p v-if="errorMessage" class="mt-1 text-xs text-red-500">{{ errorMessage }}</p>
+          <Button
+            type="button"
+            size="icon"
+            class="launch-btn"
+            :disabled="isSubmitting || isUploading"
+            @click="submitPresentation"
+          >
+            ↑
+          </Button>
+        </div>
 
-              <ul v-if="uploadedFiles.length" class="mt-2 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-                <li
-                  v-for="item in uploadedFiles"
-                  :key="item.name"
-                  class="rounded-md border bg-background/70 p-2"
-                >
-                  <div class="flex items-start gap-2">
-                    <button type="button" class="block" @click="openPreview(item)">
-                      <img
-                        :src="item.previewUrl"
-                        :alt="item.name"
-                        class="h-14 w-14 rounded-md border object-cover"
-                      >
-                    </button>
-                    <div class="min-w-0 flex flex-1 flex-col gap-1.5">
-                      <input
-                        v-model="item.assetKey"
-                        type="text"
-                        class="h-8 w-full rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        placeholder="Ключ, например logo_team"
-                      >
+        <div class="thumb-strip idle-thumb-strip">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            class="upload-tile"
+            :disabled="isSubmitting || isUploading"
+            @click="openFileDialog"
+          >
+            +
+          </Button>
 
-                      <div class="flex items-center gap-1.5">
-                        <input
-                          v-model="item.editName"
-                          type="text"
-                          class="h-8 w-full rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          placeholder="Новое имя"
-                          :disabled="item.isRenaming || item.isDeleting"
-                          @keydown.enter.prevent="renameFile(item)"
-                          @blur="renameFile(item)"
-                        >
-                        <button
-                          type="button"
-                          class="inline-flex h-8 items-center justify-center rounded-md border border-red-300 px-2 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-                          :disabled="item.isDeleting || item.isRenaming"
-                          @click="deleteFile(item)"
-                        >
-                          {{ item.isDeleting ? "..." : "×" }}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </li>
-              </ul>
-              <p v-else class="mt-2 text-xs text-muted-foreground">Нет загруженных файлов</p>
-            </section>
-          </transition>
-
-          <transition name="panel">
-            <section v-if="showLegacyPanel" class="rounded-xl border bg-card/70 p-3">
-              <h2 class="mb-2 text-sm font-medium">Legacy GenAI</h2>
-              <div class="space-y-2">
-                <textarea
-                  v-model="genAIQuestion"
-                  class="h-20 w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  placeholder="Вопрос к LLM"
-                />
-                <button
+          <div
+            v-for="item in uploadedFiles"
+            :key="item.name"
+            class="thumb-wrap"
+          >
+            <Popover
+              :open="hoveredFileName === item.name"
+              @update:open="(open) => onFilePopoverOpenChange(item.name, open)"
+            >
+              <PopoverTrigger as-child>
+                <Button
                   type="button"
-                  class="inline-flex h-8 items-center justify-center rounded-md border px-2 text-xs font-medium transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
-                  :disabled="isAskingAI"
-                  @click="askGenAI"
+                  variant="outline"
+                  class="thumb-tile"
+                  @mouseenter="openFilePopover(item.name)"
+                  @mouseleave="scheduleCloseFilePopover(item.name)"
+                  @click="openFilePreview(item)"
                 >
-                  {{ isAskingAI ? "..." : "Спросить" }}
-                </button>
-                <p v-if="genAIAnswer" class="rounded-md bg-muted p-2 text-xs">{{ genAIAnswer }}</p>
-              </div>
+                  <img :src="item.previewUrl" :alt="item.name" class="thumb-image">
+                </Button>
+              </PopoverTrigger>
 
-              <div class="mt-2 space-y-2">
-                <textarea
-                  v-model="genAIImagePrompt"
-                  class="h-20 w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  placeholder="Промпт для генерации изображения"
-                />
-                <button
-                  type="button"
-                  class="inline-flex h-8 items-center justify-center rounded-md border px-2 text-xs font-medium transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
-                  :disabled="isGeneratingAIImage"
-                  @click="generateGenAIImage"
-                >
-                  {{ isGeneratingAIImage ? "..." : "Сгенерировать" }}
-                </button>
-                <p v-if="genAIImageSavedPath" class="rounded-md bg-muted p-2 text-xs">{{ genAIImageSavedPath }}</p>
-              </div>
-            </section>
-          </transition>
-        </aside>
-
-        <section class="flex min-h-0 flex-col gap-3 slide-up">
-          <section class="rounded-xl border bg-card/70 p-3">
-            <div class="flex flex-wrap items-center gap-2 text-xs">
-              <span class="rounded-full border px-2 py-1">ID: {{ presentationId || "—" }}</span>
-              <span class="rounded-full border px-2 py-1">Статус: {{ status || "queued" }}</span>
-              <span class="rounded-full border px-2 py-1">Прогресс: {{ slidesReady }} / {{ slidesTotal }}</span>
-
-              <a
-                v-if="downloadUrl"
-                :href="downloadUrl"
-                class="inline-flex h-8 items-center justify-center rounded-md border px-3 text-xs font-medium transition-colors hover:bg-accent"
-                target="_blank"
-                rel="noreferrer"
+              <PopoverContent
+                side="top"
+                align="center"
+                :side-offset="10"
+                class="file-key-popover"
+                @mouseenter="openFilePopover(item.name)"
+                @mouseleave="scheduleCloseFilePopover(item.name)"
               >
-                Скачать
-              </a>
-              <a
-                v-if="downloadUrl"
-                :href="downloadUrl"
-                class="inline-flex h-8 items-center justify-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90"
-                download="presentation.pdf"
-              >
-                PDF
-              </a>
-            </div>
-          </section>
-
-          <section class="flex min-h-0 flex-1 flex-col rounded-xl border bg-card/70 p-3">
-            <h2 class="mb-2 text-sm font-medium">Слайды</h2>
-            <div v-if="slides.length" class="min-h-0 flex-1 overflow-y-auto pr-1">
-              <div class="grid gap-2 md:grid-cols-2 2xl:grid-cols-3">
-                <div
-                  v-for="slide in slides"
-                  :key="slide.index"
-                  class="rounded-md border bg-background/70 p-2 transition-transform duration-200 hover:-translate-y-0.5"
-                >
-                  <p class="mb-1 text-[11px] text-muted-foreground">
-                    Слайд {{ slide.index }} · {{ slide.status }}
-                  </p>
-                  <button
-                    v-if="slide.status === 'ready'"
+                <div class="file-key-row">
+                  <input
+                    v-model="item.assetKey"
+                    type="text"
+                    class="key-input"
+                    placeholder="Ключ / описание"
+                  >
+                  <Button
                     type="button"
-                    class="block w-full"
-                    @click="openSlidePreview(slide)"
+                    size="icon-sm"
+                    variant="outline"
+                    class="delete-mini"
+                    :disabled="item.isDeleting"
+                    @click="deleteFile(item)"
                   >
-                    <img
-                      :src="absoluteUrl(slide.imageUrl)"
-                      :alt="`slide ${slide.index}`"
-                      class="aspect-video w-full rounded object-contain bg-muted"
-                    >
-                  </button>
-                  <div
-                    v-else
-                    class="flex aspect-video w-full items-center justify-center rounded bg-muted text-[11px] text-muted-foreground"
-                  >
-                    {{ slide.status === 'failed' ? 'Ошибка рендера' : 'Генерируется...' }}
-                  </div>
+                    {{ item.isDeleting ? "..." : "×" }}
+                  </Button>
                 </div>
-              </div>
-            </div>
-            <p v-else class="text-xs text-muted-foreground">Слайды появятся по мере генерации.</p>
-          </section>
+              </PopoverContent>
+            </Popover>
 
-          <section v-if="showScript && scriptText" class="rounded-xl border bg-card/70 p-3">
-            <h2 class="mb-1 text-sm font-medium">Сценарий</h2>
-            <pre class="max-h-24 overflow-y-auto whitespace-pre-wrap text-xs">{{ scriptText }}</pre>
-          </section>
+            <p class="thumb-key-label">{{ item.assetKey || "key" }}</p>
+          </div>
+        </div>
+      </section>
+
+      <input
+        ref="fileInputRef"
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif"
+        class="hidden"
+        @change="onFileInputChange"
+      >
+
+      <p v-if="errorMessage" class="mt-2 text-xs text-red-500">{{ errorMessage }}</p>
+      <p v-if="presentationError" class="mt-2 text-xs text-red-500">{{ presentationError }}</p>
+    </div>
+
+    <div v-else class="viewer-state slide-up">
+      <aside class="viewer-sidebar panel-appear">
+        <section class="side-card">
+          <textarea
+            v-model="presentationPrompt"
+            class="prompt-input compact"
+            placeholder="Введите описание презентации"
+          />
+
+          <div class="idle-controls compact-row">
+            <div class="mini-select-wrap">
+              <span class="mini-label">Слайды</span>
+              <select v-model.number="slideCount" class="mini-select">
+                <option v-for="count in slideCountOptions" :key="`view-${count}`" :value="count">
+                  {{ count }}
+                </option>
+              </select>
+            </div>
+
+            <div class="mini-select-wrap flex-1">
+              <span class="mini-label">Тип</span>
+              <select v-model="workType" class="mini-select">
+                <option value="school">Школьная</option>
+                <option value="student">Студенческая</option>
+                <option value="academic">Академическая</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="viewer-actions">
+            <div class="switch-row">
+              <span class="text-xs text-muted-foreground">Сценарий</span>
+              <Switch v-model:model-value="showScript" />
+            </div>
+
+            <Button
+              type="button"
+              class="generate-btn"
+              :disabled="isSubmitting || isUploading"
+              @click="submitPresentation"
+            >
+              {{ isSubmitting ? "Генерация..." : "Генерация" }}
+            </Button>
+          </div>
         </section>
-      </div>
+
+        <section class="side-card">
+          <p class="section-title">Файлы</p>
+          <div class="thumb-strip">
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              class="upload-tile"
+              @click="openFileDialog"
+            >
+              +
+            </Button>
+
+            <div
+              v-for="item in uploadedFiles"
+              :key="`viewer-${item.name}`"
+              class="thumb-wrap"
+            >
+              <Popover
+                :open="hoveredFileName === item.name"
+                @update:open="(open) => onFilePopoverOpenChange(item.name, open)"
+              >
+                <PopoverTrigger as-child>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="thumb-tile"
+                    @mouseenter="openFilePopover(item.name)"
+                    @mouseleave="scheduleCloseFilePopover(item.name)"
+                    @click="openFilePreview(item)"
+                  >
+                    <img :src="item.previewUrl" :alt="item.name" class="thumb-image">
+                  </Button>
+                </PopoverTrigger>
+
+                <PopoverContent
+                  side="top"
+                  align="center"
+                  :side-offset="10"
+                  class="file-key-popover"
+                  @mouseenter="openFilePopover(item.name)"
+                  @mouseleave="scheduleCloseFilePopover(item.name)"
+                >
+                  <div class="file-key-row">
+                    <input
+                      v-model="item.assetKey"
+                      type="text"
+                      class="key-input"
+                      placeholder="Ключ / описание"
+                    >
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="outline"
+                      class="delete-mini"
+                      :disabled="item.isDeleting"
+                      @click="deleteFile(item)"
+                    >
+                      {{ item.isDeleting ? "..." : "×" }}
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+
+              <p class="thumb-key-label">{{ item.assetKey || "key" }}</p>
+            </div>
+          </div>
+
+          <input
+            ref="fileInputRef"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            class="hidden"
+            @change="onFileInputChange"
+          >
+        </section>
+
+        <section v-if="showScript" class="side-card">
+          <p class="section-title">Сценарий</p>
+          <pre :class="['script-block', { 'script-block-placeholder': !scriptText.trim() }]">
+            {{ scenarioPreviewText }}
+          </pre>
+        </section>
+
+        <p v-if="errorMessage" class="text-xs text-red-500">{{ errorMessage }}</p>
+        <p v-if="presentationError" class="text-xs text-red-500">{{ presentationError }}</p>
+      </aside>
+
+      <section class="viewer-content">
+        <header class="content-header">
+          <p class="progress-title">{{ progressTitle }}</p>
+          <a
+            v-if="downloadUrl"
+            :href="downloadUrl"
+            class="download-btn"
+            download="presentation.pdf"
+          >
+            Скачать PDF
+          </a>
+        </header>
+
+        <div class="slides-feed">
+          <article
+            v-for="slide in slidesFeed"
+            :key="slide.index"
+            class="slide-row"
+          >
+            <div class="slide-meta">
+              <p class="slide-title">Слайд {{ slide.index }}</p>
+              <p class="slide-status">
+                {{ slide.status === "ready" ? "Готов" : slide.status === "failed" ? "Ошибка" : "Генерация" }}
+              </p>
+            </div>
+
+            <button
+              v-if="slide.status === 'ready' && slide.imageUrl"
+              type="button"
+              class="slide-preview"
+              @click="openSlidePreview(slide)"
+            >
+              <img
+                :src="absoluteUrl(slide.imageUrl)"
+                :alt="`slide ${slide.index}`"
+                class="slide-image"
+              >
+            </button>
+
+            <div v-else class="slide-pending">
+              <span>{{ slide.status === "failed" ? "Ошибка рендера" : "Генерируется..." }}</span>
+            </div>
+          </article>
+        </div>
+      </section>
     </div>
 
     <button
@@ -316,11 +325,24 @@
       >
         Закрыть
       </button>
-      <img
-        :src="previewModal.url"
-        :alt="previewModal.name"
-        class="max-h-[95vh] max-w-[95vw] rounded-md object-contain"
-      >
+
+      <div class="preview-modal-card">
+        <img
+          :src="previewImageUrl"
+          :alt="previewImageName"
+          class="preview-modal-image"
+        >
+
+        <div v-if="previewModal.kind === 'file'" class="preview-modal-footer">
+          <span class="text-xs text-muted-foreground">Ключ файла</span>
+          <input
+            v-model="previewModal.item.assetKey"
+            type="text"
+            class="modal-key-input"
+            placeholder="Ключ / описание"
+          >
+        </div>
+      </div>
     </div>
 
     <div
@@ -350,28 +372,16 @@
 
 <script setup lang="ts">
 import { Button } from "@/components/ui/button"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Switch } from "@/components/ui/switch"
 
 type WorkType = "school" | "student" | "academic"
 
 type UploadedFile = {
   name: string
-  editName: string
   assetKey: string
   status: "uploaded"
   previewUrl: string
-  isRenaming: boolean
   isDeleting: boolean
 }
 
@@ -383,30 +393,36 @@ type UploadListResponse = {
   files: Array<{ filename: string }>
 }
 
-type RenameResponse = {
-  filename: string
+type FilePreviewModal = {
+  kind: "file"
+  item: UploadedFile
 }
 
-type GenAITextResponse = {
-  answer: string
+type SlidePreviewModal = {
+  kind: "slide"
+  url: string
+  name: string
 }
 
-type GenAIImageResponse = {
-  stored_path: string
+type PreviewModal = FilePreviewModal | SlidePreviewModal
+type SlideFeedItem = {
+  index: number
+  status: "pending" | "ready" | "failed"
+  imageUrl: string
 }
 
 const config = useRuntimeConfig()
 
 const presentationPrompt = ref("")
-const slideCount = ref(8)
-const slideCountOptions = Array.from({ length: 16 }, (_, index) => index + 5)
+const slideCount = ref(2)
+const slideCountOptions = Array.from({ length: 14 }, (_, index) => index + 2)
 const workType = ref<WorkType>("student")
 const showScript = ref(true)
 
-const showFilesPanel = ref(false)
-const showLegacyPanel = ref(false)
 const showVideoAssistModal = ref(false)
 const videoAssistUrl = "https://s3.akarmain.ru/S/sbs.mp4"
+const hoveredFileName = ref<string | null>(null)
+let filePopoverCloseTimer: ReturnType<typeof setTimeout> | null = null
 
 const {
   presentationId,
@@ -422,27 +438,115 @@ const {
   absoluteUrl,
 } = usePresentationGenerator()
 
-const workTypeLabel = computed(() => {
-  if (workType.value === "school") return "Школьная"
-  if (workType.value === "academic") return "Академическая"
-  return "Студенческая"
+const showVideoAssistButton = computed(() => Boolean(presentationId.value))
+const isViewerMode = computed(() => (
+  Boolean(isSubmitting.value || presentationId.value || status.value || slides.value.length)
+))
+const isTerminalStatus = computed(() => (
+  ["completed", "completed_with_errors", "failed"].includes(status.value || "")
+))
+
+const progressTitle = computed(() => {
+  if (status.value === "completed") {
+    return `Готово ${slidesReady.value} из ${slidesTotal.value || slideCount.value}`
+  }
+  if (status.value === "completed_with_errors") {
+    return `Готово с ошибками ${slidesReady.value} из ${slidesTotal.value || slideCount.value}`
+  }
+  if (status.value === "failed") {
+    return "Генерация завершилась с ошибкой"
+  }
+  if (status.value === "running") {
+    const total = slidesTotal.value || slideCount.value
+    const current = Math.max(1, Math.min(total, slidesReady.value + 1))
+    return `Идет генерация ${current} из ${total}`
+  }
+  if (status.value === "queued" || isSubmitting.value) {
+    return "Запуск генерации..."
+  }
+  return "Ожидание генерации"
 })
 
-const showVideoAssistButton = computed(() => Boolean(presentationId.value))
+const scenarioPreviewText = computed(() => {
+  const text = scriptText.value.trim()
+  if (text) {
+    return text
+  }
+  if (isSubmitting.value || status.value === "queued" || status.value === "running") {
+    return "Сценарий формируется..."
+  }
+  return "Сценарий пока недоступен."
+})
 
-const isDragActive = ref(false)
+const slidesFeed = computed<SlideFeedItem[]>(() => {
+  const ordered = [...slides.value]
+    .sort((a, b) => a.index - b.index)
+    .map((slide) => ({
+      index: slide.index,
+      status: slide.status,
+      imageUrl: slide.imageUrl || "",
+    }))
+
+  const total = slidesTotal.value || ordered.length || slideCount.value
+  if (isTerminalStatus.value) {
+    if (ordered.length) {
+      return ordered
+    }
+    return Array.from({ length: total }, (_, idx) => ({
+      index: idx + 1,
+      status: "pending" as const,
+      imageUrl: "",
+    }))
+  }
+
+  const readyCount = ordered.filter((slide) => slide.status === "ready").length
+  const visibleCount = Math.max(1, Math.min(total, readyCount + 1))
+  if (!ordered.length) {
+    return Array.from({ length: visibleCount }, (_, idx) => ({
+      index: idx + 1,
+      status: "pending" as const,
+      imageUrl: "",
+    }))
+  }
+
+  const byIndex = new Map(ordered.map((slide) => [slide.index, slide]))
+  const feed: SlideFeedItem[] = []
+  for (let index = 1; index <= visibleCount; index += 1) {
+    const existing = byIndex.get(index)
+    feed.push(existing || {
+      index,
+      status: "pending",
+      imageUrl: "",
+    })
+  }
+  return feed
+})
+
 const isUploading = ref(false)
 const errorMessage = ref("")
 const uploadedFiles = ref<UploadedFile[]>([])
 const fileInputRef = ref<HTMLInputElement | null>(null)
-const previewModal = ref<{ url: string, name: string } | null>(null)
+const previewModal = ref<PreviewModal | null>(null)
 
-const genAIQuestion = ref("")
-const genAIAnswer = ref("")
-const isAskingAI = ref(false)
-const genAIImagePrompt = ref("")
-const genAIImageSavedPath = ref("")
-const isGeneratingAIImage = ref(false)
+const previewImageUrl = computed(() => {
+  if (!previewModal.value) {
+    return ""
+  }
+  if (previewModal.value.kind === "file") {
+    return previewModal.value.item.previewUrl
+  }
+  return previewModal.value.url
+})
+
+const previewImageName = computed(() => {
+  if (!previewModal.value) {
+    return "preview"
+  }
+  if (previewModal.value.kind === "file") {
+    return previewModal.value.item.name
+  }
+  return previewModal.value.name
+})
 
 const uploadImageUrl = computed(
   () => `${config.public.apiBase}${config.public.uploadImagePath}`,
@@ -450,48 +554,73 @@ const uploadImageUrl = computed(
 const uploadListUrl = computed(
   () => `${config.public.apiBase}${config.public.uploadListPath}`,
 )
-const uploadRenameUrl = computed(
-  () => `${config.public.apiBase}${config.public.uploadRenamePath}`,
-)
 const uploadDeleteBaseUrl = computed(
   () => `${config.public.apiBase}${config.public.uploadDeleteBasePath}`,
 )
 const uploadPreviewBaseUrl = computed(
   () => `${config.public.apiBase}${config.public.uploadPreviewBasePath}`,
 )
-const genAITextUrl = computed(
-  () => `${config.public.apiBase}${config.public.genaiTextPath}`,
-)
-const genAIImageUrlApi = computed(
-  () => `${config.public.apiBase}${config.public.genaiImagePath}`,
-)
 
 const normalizeAssetKey = (value: string) => {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "") || "file"
+  const normalized = value
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}_-]+/gu, "_")
+    .replace(/[_-]{2,}/g, "_")
+    .replace(/^[_-]+|[_-]+$/g, "")
+  return normalized || "file"
 }
 
 const previewUrlFor = (filename: string) => (
   `${uploadPreviewBaseUrl.value}${encodeURIComponent(filename)}`
 )
 
+const clearFilePopoverCloseTimer = () => {
+  if (filePopoverCloseTimer) {
+    clearTimeout(filePopoverCloseTimer)
+    filePopoverCloseTimer = null
+  }
+}
+
+const openFilePopover = (fileName: string) => {
+  clearFilePopoverCloseTimer()
+  hoveredFileName.value = fileName
+}
+
+const scheduleCloseFilePopover = (fileName: string) => {
+  clearFilePopoverCloseTimer()
+  filePopoverCloseTimer = setTimeout(() => {
+    if (hoveredFileName.value === fileName) {
+      hoveredFileName.value = null
+    }
+    filePopoverCloseTimer = null
+  }, 120)
+}
+
+const onFilePopoverOpenChange = (fileName: string, open: boolean) => {
+  if (open) {
+    openFilePopover(fileName)
+    return
+  }
+  if (hoveredFileName.value === fileName) {
+    hoveredFileName.value = null
+  }
+}
+
 const toUploadedFile = (filename: string): UploadedFile => ({
   name: filename,
-  editName: filename,
   assetKey: normalizeAssetKey(filename.replace(/\.[^.]+$/, "")),
   status: "uploaded",
   previewUrl: previewUrlFor(filename),
-  isRenaming: false,
   isDeleting: false,
 })
 
 const loadUploadedFiles = async () => {
   try {
     const data = await $fetch<UploadListResponse>(uploadListUrl.value)
-    uploadedFiles.value = data.files.map((file) => toUploadedFile(file.filename))
+    uploadedFiles.value = data.files
+      .filter((file) => !file.filename.startsWith("."))
+      .map((file) => toUploadedFile(file.filename))
   } catch {
     errorMessage.value = "Не удалось загрузить список файлов."
   }
@@ -508,14 +637,6 @@ const onFileInputChange = (event: Event) => {
     void uploadImage(file)
   }
   input.value = ""
-}
-
-const onDrop = (event: DragEvent) => {
-  isDragActive.value = false
-  const file = event.dataTransfer?.files?.[0]
-  if (file) {
-    void uploadImage(file)
-  }
 }
 
 const uploadImage = async (file: File) => {
@@ -556,55 +677,6 @@ const uploadImage = async (file: File) => {
   }
 }
 
-const renameFile = async (item: UploadedFile) => {
-  const nextName = item.editName.trim()
-  if (!nextName) {
-    item.editName = item.name
-    return
-  }
-  if (nextName === item.name) {
-    return
-  }
-
-  item.isRenaming = true
-  errorMessage.value = ""
-  try {
-    const response = await fetch(uploadRenameUrl.value, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        filename: item.name,
-        new_filename: nextName,
-      }),
-    })
-    const payload = (await response.json().catch(() => null)) as
-      | RenameResponse
-      | { detail?: string }
-      | null
-    if (!response.ok) {
-      errorMessage.value = payload && "detail" in payload && payload.detail
-        ? payload.detail
-        : "Не удалось переименовать файл."
-      return
-    }
-
-    if (payload && "filename" in payload) {
-      const oldDefaultKey = normalizeAssetKey(item.name.replace(/\.[^.]+$/, ""))
-      const newDefaultKey = normalizeAssetKey(payload.filename.replace(/\.[^.]+$/, ""))
-      item.name = payload.filename
-      item.editName = payload.filename
-      item.previewUrl = previewUrlFor(payload.filename)
-      if (item.assetKey === oldDefaultKey) {
-        item.assetKey = newDefaultKey
-      }
-    }
-  } catch {
-    errorMessage.value = "Ошибка сети при переименовании файла."
-  } finally {
-    item.isRenaming = false
-  }
-}
-
 const deleteFile = async (item: UploadedFile) => {
   item.isDeleting = true
   errorMessage.value = ""
@@ -624,7 +696,10 @@ const deleteFile = async (item: UploadedFile) => {
     }
 
     uploadedFiles.value = uploadedFiles.value.filter((file) => file.name !== item.name)
-    if (previewModal.value?.name === item.name) {
+    if (hoveredFileName.value === item.name) {
+      hoveredFileName.value = null
+    }
+    if (previewModal.value?.kind === "file" && previewModal.value.item.name === item.name) {
       closePreview()
     }
   } catch {
@@ -635,19 +710,13 @@ const deleteFile = async (item: UploadedFile) => {
 }
 
 const buildFilesPayload = () => {
-  return uploadedFiles.value.map((file) => ({
-    key: normalizeAssetKey(file.assetKey),
-    fileId: file.name,
-    originalName: file.name,
-  }))
-}
-
-const selectSlideCount = (value: number) => {
-  slideCount.value = value
-}
-
-const selectWorkType = (value: WorkType) => {
-  workType.value = value
+  return uploadedFiles.value
+    .filter((file) => !file.name.startsWith("."))
+    .map((file) => ({
+      key: normalizeAssetKey(file.assetKey),
+      fileId: file.name,
+      originalName: file.name,
+    }))
 }
 
 const submitPresentation = async () => {
@@ -656,26 +725,23 @@ const submitPresentation = async () => {
   }
   await createPresentation({
     prompt: presentationPrompt.value.trim(),
-    slideCount: Math.max(5, Math.min(20, slideCount.value || 8)),
+    slideCount: Math.max(2, Math.min(15, slideCount.value || 2)),
     workType: workType.value,
     showScript: showScript.value,
     files: buildFilesPayload(),
   })
 }
 
-const prefillDemo = () => {
-  presentationPrompt.value = "Презентация проекта AI Deck Builder для финала хакатона"
-  slideCount.value = 8
-  workType.value = "student"
-  showScript.value = true
-}
-
-const openPreview = (item: UploadedFile) => {
-  previewModal.value = { url: item.previewUrl, name: item.name }
+const openFilePreview = (item: UploadedFile) => {
+  previewModal.value = {
+    kind: "file",
+    item,
+  }
 }
 
 const openSlidePreview = (slide: { index: number, imageUrl: string }) => {
   previewModal.value = {
+    kind: "slide",
     url: absoluteUrl(slide.imageUrl),
     name: `slide ${slide.index}`,
   }
@@ -685,83 +751,403 @@ const closePreview = () => {
   previewModal.value = null
 }
 
-const askGenAI = async () => {
-  const question = genAIQuestion.value.trim()
-  if (!question) {
-    return
-  }
-
-  isAskingAI.value = true
-  try {
-    const response = await fetch(genAITextUrl.value, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
-    })
-    const payload = (await response.json().catch(() => null)) as
-      | GenAITextResponse
-      | { detail?: string }
-      | null
-    if (!response.ok) {
-      return
-    }
-    genAIAnswer.value = payload && "answer" in payload ? payload.answer : ""
-  } finally {
-    isAskingAI.value = false
-  }
-}
-
-const generateGenAIImage = async () => {
-  const prompt = genAIImagePrompt.value.trim()
-  if (!prompt) {
-    return
-  }
-
-  isGeneratingAIImage.value = true
-  genAIImageSavedPath.value = ""
-  try {
-    const response = await fetch(genAIImageUrlApi.value, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
-    })
-    const payload = (await response.json().catch(() => null)) as
-      | GenAIImageResponse
-      | { detail?: string }
-      | null
-    if (!response.ok) {
-      return
-    }
-    genAIImageSavedPath.value = payload && "stored_path" in payload ? payload.stored_path : ""
-  } finally {
-    isGeneratingAIImage.value = false
-  }
-}
-
 onMounted(() => {
   void loadUploadedFiles()
+})
+
+onBeforeUnmount(() => {
+  clearFilePopoverCloseTimer()
 })
 </script>
 
 <style scoped>
-.fade-in {
-  animation: fadeIn 320ms ease-out;
+.workspace-page {
+  position: relative;
+  height: calc(100vh - 4rem);
+  padding: 10px;
+  overflow: hidden;
 }
 
-.slide-up {
-  animation: slideUp 380ms ease-out;
+.idle-state {
+  height: 100%;
+  border: 1px solid hsl(var(--border));
+  border-radius: 20px;
+  background: hsl(var(--background));
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.panel-appear {
-  animation: panelAppear 220ms ease-out;
+.idle-card {
+  width: min(930px, 92vw);
+  border: 1px solid hsl(var(--border));
+  border-radius: 26px;
+  background: hsl(var(--card));
+  padding: 14px;
+}
+
+.prompt-input {
+  width: 100%;
+  height: 130px;
+  resize: none;
+  border: none;
+  background: transparent;
+  font-size: 34px;
+  line-height: 1.25;
+  outline: none;
+}
+
+.prompt-input.compact {
+  height: 92px;
+  font-size: 13px;
+}
+
+.idle-controls {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.compact-row {
+  margin-top: 6px;
+}
+
+.mini-select-wrap {
+  min-width: 86px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mini-label {
+  font-size: 10px;
+  color: hsl(var(--muted-foreground));
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.mini-select {
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--background));
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
+}
+
+.launch-btn {
+  margin-left: auto;
+  width: 52px;
+  height: 52px;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  font-size: 24px;
+  font-weight: 800;
+  padding: 0;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.switch-chip {
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--background));
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.thumb-strip {
+  margin-top: 8px;
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  overflow-y: visible;
+  padding-bottom: 2px;
+}
+
+.idle-thumb-strip {
+  margin-top: 8px;
+  min-height: 102px;
+}
+
+.thumb-key-label {
+  margin: 4px 0 0;
+  max-width: 66px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: hsl(var(--muted-foreground));
+  text-align: center;
+}
+
+.thumb-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.upload-tile,
+.thumb-tile {
+  width: 66px;
+  height: 66px;
+  border-radius: 14px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--muted));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: 800;
+  padding: 0;
+}
+
+.thumb-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 13px;
+}
+
+.file-key-popover {
+  width: 220px;
+  padding: 8px;
+}
+
+.file-key-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.key-input,
+.modal-key-input {
+  width: 100%;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--background));
+  padding: 0 8px;
+  font-size: 12px;
+  outline: none;
+}
+
+.delete-mini {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid hsl(var(--border));
+  color: #dc2626;
+  font-weight: 700;
+  padding: 0;
+}
+
+.viewer-state {
+  height: 100%;
+  border: 1px solid hsl(var(--border));
+  border-radius: 20px;
+  background: hsl(var(--background));
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+}
+
+.viewer-sidebar {
+  min-height: 0;
+  border: 1px solid hsl(var(--border));
+  border-radius: 16px;
+  background: hsl(var(--card));
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+}
+
+.side-card {
+  border: 1px solid hsl(var(--border));
+  border-radius: 12px;
+  background: hsl(var(--background));
+  padding: 8px;
+}
+
+.viewer-actions {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.generate-btn {
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.section-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.script-block {
+  margin-top: 6px;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.script-block-placeholder {
+  color: hsl(var(--muted-foreground));
+  font-style: italic;
+}
+
+.viewer-content {
+  min-height: 0;
+  border: 1px solid hsl(var(--border));
+  border-radius: 16px;
+  background: hsl(var(--card));
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.content-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.progress-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.download-btn {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid hsl(var(--border));
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.slides-feed {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.slide-row {
+  border: 1px solid hsl(var(--border));
+  border-radius: 12px;
+  background: hsl(var(--background));
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.slide-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  justify-content: center;
+}
+
+.slide-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.slide-status {
+  margin: 0;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+
+.slide-preview,
+.slide-pending {
+  width: 100%;
+  min-height: 100px;
+  border-radius: 10px;
+  border: 1px solid hsl(var(--border));
+  overflow: hidden;
+}
+
+.slide-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: hsl(var(--muted));
+}
+
+.slide-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+
+.preview-modal-card {
+  width: min(92vw, 1300px);
+  max-height: 92vh;
+  border: 1px solid hsl(var(--border));
+  border-radius: 14px;
+  background: hsl(var(--background));
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.preview-modal-image {
+  width: 100%;
+  max-height: calc(92vh - 68px);
+  object-fit: contain;
+  background: hsl(var(--muted));
+}
+
+.preview-modal-footer {
+  border-top: 1px solid hsl(var(--border));
+  padding: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .video-assist-btn {
   position: absolute;
-  right: 14px;
+  right: 16px;
   top: 50%;
   transform: translateY(-50%);
-  height: 36px;
+  height: 34px;
   padding: 0 12px;
   border-radius: 999px;
   border: 1px solid hsl(var(--border));
@@ -769,23 +1155,18 @@ onMounted(() => {
   font-size: 12px;
   font-weight: 600;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
-.video-assist-btn:hover {
-  transform: translateY(-50%) translateX(-2px);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+.fade-in {
+  animation: fadeIn 250ms ease-out;
 }
 
-.panel-enter-active,
-.panel-leave-active {
-  transition: all 220ms ease;
+.slide-up {
+  animation: slideUp 300ms ease-out;
 }
 
-.panel-enter-from,
-.panel-leave-to {
-  opacity: 0;
-  transform: translateY(-6px);
+.panel-appear {
+  animation: panelAppear 220ms ease-out;
 }
 
 @keyframes fadeIn {
@@ -800,7 +1181,7 @@ onMounted(() => {
 @keyframes slideUp {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
@@ -816,6 +1197,35 @@ onMounted(() => {
   to {
     opacity: 1;
     transform: scale(1);
+  }
+}
+
+@media (max-width: 1200px) {
+  .idle-card {
+    width: min(96vw, 780px);
+  }
+
+  .viewer-state {
+    grid-template-columns: 1fr;
+  }
+
+  .slide-row {
+    grid-template-columns: 1fr;
+  }
+
+  .prompt-input {
+    font-size: 22px;
+  }
+
+  .mini-select {
+    font-size: 16px;
+  }
+
+  .video-assist-btn {
+    right: 12px;
+    top: auto;
+    bottom: 12px;
+    transform: none;
   }
 }
 </style>

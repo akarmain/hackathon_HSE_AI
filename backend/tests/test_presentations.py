@@ -17,7 +17,7 @@ def test_create_presentation_validates_slide_count() -> None:
         "/api/presentations",
         json={
             "prompt": "My deck",
-            "slideCount": 3,
+            "slideCount": 1,
             "workType": "school",
             "showScript": True,
             "files": [],
@@ -91,6 +91,62 @@ def test_service_saves_meta_and_scenario_and_handles_partial_errors(tmp_path: Pa
     assert meta["files"][1]["key"] == "logo_2"
 
 
+def test_service_ignores_hidden_file_refs_like_ds_store(tmp_path: Path) -> None:
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    (uploads_dir / "sample.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (uploads_dir / ".DS_Store").write_bytes(b"meta")
+
+    settings = Settings(
+        uploads_dir=str(uploads_dir),
+        presentations_dir=str(tmp_path / "presentations"),
+        genai_images_dir=str(tmp_path / "genai"),
+        genai_api_key="",
+    )
+    service = PresentationService(settings=settings)
+    payload = CreatePresentationRequest(
+        prompt="Test hidden file filtering",
+        slideCount=5,
+        workType="school",
+        showScript=False,
+        files=[
+            PresentationFileRef(key="img", fileId="sample.png"),
+            PresentationFileRef(key="trash", fileId=".DS_Store"),
+        ],
+    )
+
+    created = service.create_presentation(payload, start_background=False)
+    meta = service._storage.load_meta(created.presentationId)
+    file_ids = [item["fileId"] for item in meta["files"]]
+    assert "sample.png" in file_ids
+    assert ".DS_Store" not in file_ids
+
+
+def test_service_keeps_unicode_file_key_descriptions(tmp_path: Path) -> None:
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    (uploads_dir / "cat.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    settings = Settings(
+        uploads_dir=str(uploads_dir),
+        presentations_dir=str(tmp_path / "presentations"),
+        genai_images_dir=str(tmp_path / "genai"),
+        genai_api_key="",
+    )
+    service = PresentationService(settings=settings)
+    payload = CreatePresentationRequest(
+        prompt="Тест ключей файлов",
+        slideCount=5,
+        workType="student",
+        showScript=False,
+        files=[PresentationFileRef(key="мой котик на улице", fileId="cat.png")],
+    )
+
+    created = service.create_presentation(payload, start_background=False)
+    meta = service._storage.load_meta(created.presentationId)
+    assert meta["files"][0]["key"] == "мой_котик_на_улице"
+
+
 def test_fallback_scenario_builds_topic_specific_slides(tmp_path: Path) -> None:
     settings = Settings(
         uploads_dir=str(tmp_path / "uploads"),
@@ -118,6 +174,32 @@ def test_fallback_scenario_builds_topic_specific_slides(tmp_path: Path) -> None:
     assert "мытищ" in first_slide["mainText"].lower()
     assert first_slide["title"].lower() not in {"контекст и цель"}
     assert "формулируем цель презентации" not in first_slide["mainText"].lower()
+
+
+def test_fallback_scenario_respects_slide_topic_directive(tmp_path: Path) -> None:
+    settings = Settings(
+        uploads_dir=str(tmp_path / "uploads"),
+        presentations_dir=str(tmp_path / "presentations"),
+        genai_images_dir=str(tmp_path / "genai"),
+        genai_api_key="",
+    )
+    storage = PresentationStorage(settings.presentations_dir)
+    orchestrator = PresentationOrchestrator(settings=settings, storage=storage)
+
+    scenario = orchestrator._fallback_scenario(
+        prompt="презентация про животных где 2 слайд про котиков",
+        slide_count=5,
+        work_type="student",
+        show_script=False,
+        file_keys=[],
+        file_hints=[],
+    )
+
+    assert len(scenario["slides"]) == 5
+    second = scenario["slides"][1]
+    combined = f"{second['title']} {second['mainText']} {' '.join(second['bullets'])}".lower()
+    assert "котик" in combined or "кот" in combined
+    assert "рабочему решению" not in second["mainText"].lower()
 
 
 def test_quality_gate_rejects_instructional_scenario(tmp_path: Path) -> None:

@@ -193,13 +193,31 @@ class PresentationService:
         used_keys: set[str] = set()
         normalized: list[dict] = []
         for index, item in enumerate(files, start=1):
-            safe_file_id = sanitize_filename(item.fileId)
-            absolute_path = uploads_dir / safe_file_id
-            if not absolute_path.exists() or not absolute_path.is_file():
+            raw_file_id = (item.fileId or "").strip()
+            base_file_id = raw_file_id.replace("\\", "/").split("/")[-1].strip()
+            if base_file_id in {"", ".", ".."}:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"File not found for fileId='{item.fileId}'",
+                    detail=f"Invalid fileId='{item.fileId}'",
                 )
+
+            # Ignore hidden OS/service files like .DS_Store to avoid blocking generation.
+            if base_file_id.startswith("."):
+                continue
+
+            absolute_path = uploads_dir / base_file_id
+            if not absolute_path.exists() or not absolute_path.is_file():
+                # Backward compatibility: some old file ids may be stored in sanitized form.
+                safe_file_id = sanitize_filename(base_file_id)
+                fallback_path = uploads_dir / safe_file_id
+                if fallback_path.exists() and fallback_path.is_file():
+                    absolute_path = fallback_path
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"File not found for fileId='{item.fileId}'",
+                    )
+            resolved_file_id = absolute_path.name
 
             base_key = self._normalize_key(item.key or item.fileId or f"file_{index}")
             unique_key = base_key
@@ -212,8 +230,8 @@ class PresentationService:
             normalized.append(
                 {
                     "key": unique_key,
-                    "fileId": safe_file_id,
-                    "originalName": item.originalName or safe_file_id,
+                    "fileId": resolved_file_id,
+                    "originalName": item.originalName or resolved_file_id,
                     "mimeType": item.mimeType,
                     "absolutePath": str(absolute_path),
                 }
@@ -222,6 +240,7 @@ class PresentationService:
 
     def _normalize_key(self, raw_key: str) -> str:
         lowered = raw_key.strip().lower()
-        safe = re.sub(r"[^a-z0-9_]+", "_", lowered)
+        # Keep unicode letters/digits so russian descriptions don't collapse to "file".
+        safe = re.sub(r"[^\w-]+", "_", lowered, flags=re.UNICODE)
         safe = re.sub(r"_+", "_", safe).strip("_")
         return safe or "file"
