@@ -7,6 +7,10 @@
 - скачивание итогового результата (PDF/ZIP),
 - тестовые GenAI one-shot endpoints (text/image).
 
+## Видео-демо
+
+https://youtu.be/rw3tQjp8ovM
+
 ## Запуск
 
 Backend:
