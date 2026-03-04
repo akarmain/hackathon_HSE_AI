@@ -9,7 +9,7 @@
 
 ## Видео-демо
 
-https://youtu.be/rw3tQjp8ovM
+[![Демо видео](https://img.youtube.com/vi/rw3tQjp8ovM/0.jpg)](https://youtu.be/rw3tQjp8ovM)
 
 ## Запуск
 
